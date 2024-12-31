@@ -124,20 +124,30 @@ def decode(inputs,
     logits = tokens_to_logits(cur_ids)
 
     ####### MDLM ########
+    jax.debug.print("\nStep {x}", x=step)
+    unknown_map = (cur_ids == mask_token_id)
+    jax.debug.print("Mask perc. {x}", x=unknown_map.sum() / cur_ids.size)
+    logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
     x_theta = jax.nn.softmax(logits, axis=-1)
-    t = 1. * step / num_iter
-    move_chance_t = mask_schedule.schedule(t, unknown_number_in_the_beginning,
+    t = 1. * (num_iter - step) / num_iter
+    move_chance_t = 1. - mask_schedule.schedule(t, unknown_number_in_the_beginning,
                                         mask_scheduling_method)
-    s = 1. * (step + 1) / num_iter
-    move_chance_s = mask_schedule.schedule(s, unknown_number_in_the_beginning,
+    jax.debug.print("move_chance_t {x}", x=move_chance_t)
+    s = 1. * (num_iter - step - 1) / num_iter
+    jax.debug.print("s {x}", x=s)
+    move_chance_s = 1. - mask_schedule.schedule(s, unknown_number_in_the_beginning,
                                            mask_scheduling_method)
+    jax.debug.print("move_chance_s {x}", x=move_chance_s)
     q_xs = x_theta * (move_chance_t - move_chance_s)
-    q_xs[:, :, mask_token_id] = move_chance_s[:, :, 0]
+    q_xs = q_xs.at[..., mask_token_id].set(move_chance_s)
     q_xs /= move_chance_t
+    jax.debug.print("Mask prob {x}", x=q_xs[..., mask_token_id].mean())
 
     rng, sample_rng = jax.random.split(rng, 2)
-    # Samples the ids using categorical sampling: [batch_size, seq_length].
-    sampled_ids = jax.random.categorical(sample_rng, q_xs)
+    # Sample the ids using categorical sampling: [batch_size, seq_length].
+    # sampled_ids = jax.random.categorical(sample_rng, q_xs)
+    gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, probs.shape) + 1e-10)
+    sampled_ids = (probs / gumbel_norm).argmax(axis=-1)
     unknown_map = (cur_ids == mask_token_id)
     sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
     final_seqs = jax.lax.dynamic_update_slice(
