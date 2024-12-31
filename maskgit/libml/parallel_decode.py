@@ -124,35 +124,26 @@ def decode(inputs,
     logits = tokens_to_logits(cur_ids)
 
     ####### MDLM ########
-    jax.debug.print("\nStep {x}", x=step)
-    unknown_map = (cur_ids == mask_token_id)
-    jax.debug.print("Mask perc. {x}", x=unknown_map.sum() / cur_ids.size)
     logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
     x_theta = jax.nn.softmax(logits, axis=-1)
-    jax.debug.print("{x}", x=x_theta.sum())
     t = 1. * (num_iter - step) / num_iter
-    jax.debug.print("t {x}", x=t)
     move_chance_t = 1. - mask_schedule.schedule(t, unknown_number_in_the_beginning,
                                         mask_scheduling_method)
-    jax.debug.print("move_chance_t {x}", x=move_chance_t)
     s = 1. * (num_iter - step - 1) / num_iter
-    jax.debug.print("s {x}", x=s)
     move_chance_s = 1. - mask_schedule.schedule(s, unknown_number_in_the_beginning,
                                            mask_scheduling_method)
-    jax.debug.print("move_chance_s {x}", x=move_chance_s)
     q_xs = x_theta * (move_chance_t - move_chance_s) / move_chance_t
     q_xs = q_xs.at[..., mask_token_id].set(move_chance_s / move_chance_t)
-    jax.debug.print("Prob check {x}", x=q_xs.sum() / cur_ids.size)
-    jax.debug.print("Mask prob {x}", x=q_xs[..., mask_token_id].mean())
 
     rng, sample_rng = jax.random.split(rng, 2)
     # Sample the ids using categorical sampling: [batch_size, seq_length].
     # sampled_ids = jax.random.categorical(sample_rng, q_xs)
     gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
     sampled_ids = (q_xs / gumbel_norm).argmax(axis=-1)
+    # Replace token |V| with mask_token_id
+    sampled_ids = jnp.where(sampled_ids == (q_xs.shape[-1] - 1), mask_token_id, sampled_ids)
     unknown_map = (cur_ids == mask_token_id)
     sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
-    jax.debug.print("New Mask perc. {x}", x=(sampled_ids == mask_token_id).sum() / sampled_ids.size)
     final_seqs = jax.lax.dynamic_update_slice(
       state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
 
