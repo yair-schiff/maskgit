@@ -71,7 +71,7 @@ class ImageNet_class_conditional_generator():
         self.tokenizer_variables = restore_from_path(
             ImageNet_class_conditional_generator.checkpoint_canonical_path("tokenizer", image_size))
 
-    def generate_samples(self, input_tokens, rng, start_iter=0, num_iterations=16):
+    def generate_samples(self, input_tokens, rng, **kwargs):
       def tokens_to_logits(seq):
         logits = self.transformer_model.apply(self.transformer_variables, seq, deterministic=True)
         logits = logits[..., :self.maskgit_cf.vqvae.codebook_size]
@@ -81,12 +81,11 @@ class ImageNet_class_conditional_generator():
             input_tokens,
             rng,
             tokens_to_logits,
-            num_iter=num_iterations,
             choice_temperature=self.maskgit_cf.sample_choice_temperature,
             mask_token_id=self.maskgit_cf.transformer.mask_token_id,
-            start_iter=start_iter,
+            **kwargs
             )
-    
+
       output_tokens = jnp.reshape(output_tokens[:, -1, 1:], [-1, self.transformer_latent_size, self.transformer_latent_size])
       gen_images = self.tokenizer_model.apply(
           self.tokenizer_variables,
@@ -98,7 +97,7 @@ class ImageNet_class_conditional_generator():
 
     def create_input_tokens_normal(self, label):
         label_tokens = label * jnp.ones([self.maskgit_cf.eval_batch_size, 1])
-        # Shift the label by codebook_size 
+        # Shift the label by codebook_size
         label_tokens = label_tokens + self.maskgit_cf.vqvae.codebook_size
         # Create blank masked tokens
         blank_tokens = jnp.ones([self.maskgit_cf.eval_batch_size, self.transformer_block_size-1])
@@ -107,11 +106,11 @@ class ImageNet_class_conditional_generator():
         input_tokens = jnp.concatenate([label_tokens, masked_tokens], axis=-1)
         return input_tokens.astype(jnp.int32)
 
-    def p_generate_samples(self, start_iter=0, num_iterations=16):
+    def p_generate_samples(self, **kwargs):
         """For TPUs/GPUs with lots of memory, using pmap provides a substantial speedup, but
         requires a slightly different API call and a different input shape.
         """
-        return jax.pmap(functools.partial(self.generate_samples, start_iter=start_iter, num_iterations=num_iterations), axis_name="batch")
+        return jax.pmap(functools.partial(self.generate_samples, **kwargs), axis_name="batch")
 
     def p_edit_samples(self, start_iter=2, num_iterations=12):
         """For TPUs/GPUs with lots of memory, using pmap provides a substantial speedup, but
@@ -157,7 +156,7 @@ class ImageNet_class_conditional_generator():
 
         # Create input tokens based on the category label
         label_tokens = target_label * jnp.ones([self.maskgit_cf.eval_batch_size, 1])
-        # Shift the label tokens by codebook_size 
+        # Shift the label tokens by codebook_size
         label_tokens = label_tokens + self.maskgit_cf.vqvae.codebook_size
         # Concatenate the two as input_tokens
         input_tokens = jnp.concatenate([label_tokens, masked_tokens], axis=-1)
