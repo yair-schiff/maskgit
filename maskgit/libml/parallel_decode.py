@@ -32,7 +32,7 @@ def mask_by_random_topk(rng, mask_len, probs, temperature=1.0):
   JAX's original implementation is as below:
     g = -gumbel(key, (n_inputs,)) - jnp.log(p)
     ind = jnp.argsort(g)[:n_draws]
-  We adds temperature annealing on top of it, which is:
+  We add temperature annealing on top of it, which is:
     g = -gumbel(key, (n_inputs,)) - temperature * jnp.log(p)
     ind = jnp.argsort(g)[:n_draws]
 
@@ -46,8 +46,7 @@ def mask_by_random_topk(rng, mask_len, probs, temperature=1.0):
   Returns:
     A binary masking map [batch_size, seq_len].
   """
-  confidence = jnp.log(probs) + temperature * jax.random.gumbel(
-      rng, probs.shape)
+  confidence = jnp.log(probs) + temperature * jax.random.gumbel(rng, probs.shape)
   sorted_confidence = jnp.sort(confidence, axis=-1)
   # Obtains cut off threshold given the mask lengths.
   cut_off = jnp.take_along_axis(sorted_confidence, mask_len.astype(jnp.int32), axis=-1)
@@ -63,6 +62,8 @@ class State:
   cur_index: jnp.ndarray  # scalar int32: current decoded length index
   # The active sequence log probabilities and finished sequence scores.
   cur_seqs: jnp.ndarray  # int32 [batch, seq_len]
+  # The logprob of the decoded token (at time of decoding); set to -inf for masked tokens
+  cur_logprob: jnp.ndarray  # float32 [batch, seq_len]
   rng: jnp.ndarray  # Sampling random state.
   final_seqs: jnp.ndarray  # int32 [batch, num_iter, seq_len]
 
@@ -71,10 +72,11 @@ def state_init(init_indices, rng, num_iter, start_iter=0):
   """Initializes the decoding state data structure."""
   cur_index0 = jnp.array(start_iter)
   cur_seqs0 = init_indices
+  cur_logprob0 = jnp.ones_like(init_indices, dtype=jnp.float32) * -_CONFIDENCE_OF_KNOWN_TOKENS
   final_seqs0 = jnp.expand_dims(init_indices, 1)
   final_seqs0 = jnp.tile(final_seqs0, (1, num_iter, 1))
   return State(
-      cur_index=cur_index0, cur_seqs=cur_seqs0, rng=rng, final_seqs=final_seqs0)
+      cur_index=cur_index0, cur_seqs=cur_seqs0, cur_logprob=cur_logprob0, rng=rng, final_seqs=final_seqs0)
 
 def decode(inputs,
            rng,
@@ -131,28 +133,46 @@ def decode(inputs,
 
     ####### MDIM ########
     if decoding_strategy == 'mdim':
-      logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
-      x_theta = jax.nn.softmax(logits, axis=-1)
+      # Compute max sigma value
       t = 1. * (num_iter - step) / num_iter
       alpha_t = mask_schedule.schedule(t, unknown_number_in_the_beginning, mask_scheduling_method)
       s = 1. * (num_iter - step - 1) / num_iter
       alpha_s = mask_schedule.schedule(s, unknown_number_in_the_beginning, mask_scheduling_method)
-      mdim_sigma = jnp.minimum(mdim_eta * (1 - alpha_s) / alpha_t, 1.)
+      max_sigma = jnp.minimum((1 - alpha_s) / alpha_t, 1.)
+
+      # Forward pass
+      logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
+      x_theta = jax.nn.softmax(logits, axis=-1)
+
+      # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
+      eta = jax.nn.softmax(state.cur_logprob, axis=-1)
+      eta = jnp.nan_to_num(jnp.where((cur_ids == mask_token_id), 0., eta))
+      sigma = eta * max_sigma
+
+      # Compute MDIM posterior
       limiting_distribution = jax.nn.one_hot(jnp.array([vocab_size - 1]), vocab_size)
       # Case 1: cur_ids = mask
-      case1 = ((alpha_s - alpha_t * (1 - mdim_sigma)) / (1 - alpha_t) * x_theta +
-               (1 - alpha_s - alpha_t * mdim_sigma) / (1 - alpha_t) * limiting_distribution)
+      case1 = ((alpha_s - alpha_t * (1 - sigma)) / (1 - alpha_t) * x_theta +
+               (1 - alpha_s - alpha_t * sigma) / (1 - alpha_t) * limiting_distribution)
       # Case 2: cur_ids != mask
-      case2 = (1 - mdim_sigma) * jax.nn.one_hot(cur_ids, vocab_size) + mdim_sigma * limiting_distribution
+      case2 = (1 - sigma) * jax.nn.one_hot(cur_ids, vocab_size) + sigma * limiting_distribution
       q_xs = jnp.where((cur_ids == mask_token_id)[..., None], case1, case2)
 
-      rng, sample_rng = jax.random.split(rng, 2)
       # Sample the ids using categorical sampling: [batch_size, seq_length].
+      rng, sample_rng = jax.random.split(rng, 2)
       gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
       sampled_ids = (q_xs / gumbel_norm).argmax(axis=-1)
       # Replace token |V| with mask_token_id
       sampled_ids = jnp.where(sampled_ids == (vocab_size - 1), mask_token_id, sampled_ids)
+      # Update decoded logprobs
+      logprobs = jax.nn.log_softmax(logits, axis=-1)
+      selected_logprobs = jnp.squeeze(
+        jnp.take_along_axis(logprobs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
+      # Keep masked tokens' logprobs as -inf
+      cur_logprobs = jnp.where((sampled_ids == mask_token_id), state.cur_logprob, selected_logprobs)
+      # (re-)Hardcode BOS token
       sampled_ids = sampled_ids.at[..., 0].set(cur_ids[..., 0])
+      cur_logprobs = cur_logprobs.at[..., 0].set(-_CONFIDENCE_OF_KNOWN_TOKENS)  # BOS token should remain unmasked
       final_seqs = jax.lax.dynamic_update_slice(
         state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
 
@@ -180,8 +200,9 @@ def decode(inputs,
       sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
       final_seqs = jax.lax.dynamic_update_slice(
         state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
+      cur_logprobs = None
 
-    ######## MaskGiT approach ########
+    ######## MaskGiT ########
     elif decoding_strategy == 'maskgit':
       rng, sample_rng = jax.random.split(rng, 2)
       # Samples the ids using categorical sampling: [batch_size, seq_length].
@@ -220,12 +241,14 @@ def decode(inputs,
                                     choice_temperature * (1. - ratio))
       # Masks tokens with lower confidence.
       sampled_ids = jnp.where(masking, mask_token_id, sampled_ids)
+      cur_logprobs = None
     else:
       raise ValueError(f"Unknown decoding strategy: {decoding_strategy}")
 
     return State(
         cur_index=state.cur_index + 1,
         cur_seqs=sampled_ids,
+        cur_logprobs=cur_logprobs,
         rng=rng,
         final_seqs=final_seqs)
 

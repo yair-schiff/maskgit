@@ -84,9 +84,11 @@ class ImageNet_class_conditional_generator():
             choice_temperature=self.maskgit_cf.sample_choice_temperature,
             mask_token_id=self.maskgit_cf.transformer.mask_token_id,
             **kwargs
-            )
+            )  # Returns shape: (batch_size, num_iter, num_tokens)
 
-      output_tokens = jnp.reshape(output_tokens[:, -1, 1:], [-1, self.transformer_latent_size, self.transformer_latent_size])
+      output_tokens = jnp.reshape(
+          output_tokens[:, -1, 1:],  # Take last iter; remove 'BOS' token
+          [-1, self.transformer_latent_size, self.transformer_latent_size])
       gen_images = self.tokenizer_model.apply(
           self.tokenizer_variables,
           output_tokens,
