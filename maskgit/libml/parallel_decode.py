@@ -79,6 +79,7 @@ def state_init(init_indices, rng, num_iter, start_iter=0):
 def decode(inputs,
            rng,
            tokens_to_logits,
+           decoding_strategy='maskgit',
            mask_token_id=-1,
            num_iter=12,
            start_iter=0,
@@ -88,10 +89,12 @@ def decode(inputs,
 
   Args:
     inputs: int32 array: [batch_size, seq_length] input sequence of masked
-      tokens, where the masking tokens is defined by mask_token_id.
+      tokens, where the masked tokens are defined by mask_token_id.
     rng: jnp.ndarray: sampling random state.
     tokens_to_logits: decoder function taking single token slices and cache and
       returning logits and updated cache.
+    decoding_strategy: string: decoding strategy to use.
+      Options are 'maskgit', 'mdim', 'mdlm'.
     mask_token_id: int: [Mask] token id.
     num_iter: int: default is 12.
     start_iter: int: default is 0.
@@ -122,69 +125,101 @@ def decode(inputs,
 
     # Calls model on current seqs to get next-iteration seqs.
     logits = tokens_to_logits(cur_ids)
+    vocab_size = logits.shape[-1]
+
+    ####### MDIM ########
+    if decoding_strategy == 'mdim':
+      logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
+      x_theta = jax.nn.softmax(logits, axis=-1)
+      t = 1. * (num_iter - step) / num_iter
+      alpha_t = mask_schedule.schedule(t, unknown_number_in_the_beginning, mask_scheduling_method)
+      s = 1. * (num_iter - step - 1) / num_iter
+      alpha_s = mask_schedule.schedule(s, unknown_number_in_the_beginning, mask_scheduling_method)
+      mdim_sigma = jnp.minimum(mdim_eta * (1 - alpha_s) / alpha_t, 1.)
+      limiting_distribution = jax.nn.one_hot(jnp.array([vocab_size - 1]), vocab_size)
+      # Case 1: cur_ids = mask
+      case1 = ((alpha_s - alpha_t * (1 - mdim_sigma)) / (1 - alpha_t) * x_theta +
+               (1 - alpha_s - alpha_t * mdim_sigma) / (1 - alpha_t) * limiting_distribution)
+      # Case 2: cur_ids != mask
+      case2 = (1 - mdim_sigma) * jax.nn.one_hot(cur_ids, vocab_size) + mdim_sigma * limiting_distribution
+      q_xs = jnp.where((cur_ids == mask_token_id)[..., None], case1, case2)
+
+      rng, sample_rng = jax.random.split(rng, 2)
+      # Sample the ids using categorical sampling: [batch_size, seq_length].
+      gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
+      sampled_ids = (q_xs / gumbel_norm).argmax(axis=-1)
+      # Replace token |V| with mask_token_id
+      sampled_ids = jnp.where(sampled_ids == (vocab_size - 1), mask_token_id, sampled_ids)
+      sampled_ids = sampled_ids.at[..., 0].set(cur_ids[..., 0])
+      final_seqs = jax.lax.dynamic_update_slice(
+        state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
 
     ####### MDLM ########
-    logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
-    x_theta = jax.nn.softmax(logits, axis=-1)
-    t = 1. * (num_iter - step) / num_iter
-    move_chance_t = 1. - mask_schedule.schedule(t, unknown_number_in_the_beginning,
-                                        mask_scheduling_method)
-    s = 1. * (num_iter - step - 1) / num_iter
-    move_chance_s = 1. - mask_schedule.schedule(s, unknown_number_in_the_beginning,
-                                           mask_scheduling_method)
-    q_xs = x_theta * (move_chance_t - move_chance_s) / move_chance_t
-    q_xs = q_xs.at[..., mask_token_id].set(move_chance_s / move_chance_t)
+    elif decoding_strategy == 'mdlm':
+      logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
+      x_theta = jax.nn.softmax(logits, axis=-1)
+      t = 1. * (num_iter - step) / num_iter
+      move_chance_t = 1. - mask_schedule.schedule(t, unknown_number_in_the_beginning,
+                                          mask_scheduling_method)
+      s = 1. * (num_iter - step - 1) / num_iter
+      move_chance_s = 1. - mask_schedule.schedule(s, unknown_number_in_the_beginning,
+                                             mask_scheduling_method)
+      q_xs = x_theta * (move_chance_t - move_chance_s) / move_chance_t
+      q_xs = q_xs.at[..., mask_token_id].set(move_chance_s / move_chance_t)
 
-    rng, sample_rng = jax.random.split(rng, 2)
-    # Sample the ids using categorical sampling: [batch_size, seq_length].
-    # sampled_ids = jax.random.categorical(sample_rng, q_xs)
-    gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
-    sampled_ids = (q_xs / gumbel_norm).argmax(axis=-1)
-    # Replace token |V| with mask_token_id
-    sampled_ids = jnp.where(sampled_ids == (q_xs.shape[-1] - 1), mask_token_id, sampled_ids)
-    unknown_map = (cur_ids == mask_token_id)
-    sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
-    final_seqs = jax.lax.dynamic_update_slice(
-      state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
+      rng, sample_rng = jax.random.split(rng, 2)
+      # Sample the ids using categorical sampling: [batch_size, seq_length].
+      # sampled_ids = jax.random.categorical(sample_rng, q_xs)
+      gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
+      sampled_ids = (q_xs / gumbel_norm).argmax(axis=-1)
+      # Replace token |V| with mask_token_id
+      sampled_ids = jnp.where(sampled_ids == (vocab_size - 1), mask_token_id, sampled_ids)
+      unknown_map = (cur_ids == mask_token_id)
+      sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
+      final_seqs = jax.lax.dynamic_update_slice(
+        state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
 
-    # ####### MaskGiT approach ########
-    # rng, sample_rng = jax.random.split(rng, 2)
-    # # Samples the ids using categorical sampling: [batch_size, seq_length].
-    # sampled_ids = jax.random.categorical(sample_rng, logits)
-    #
-    # # Just updates the masked tokens.
-    # unknown_map = (cur_ids == mask_token_id)
-    # sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
-    # # Defines the mask ratio for the next round. The number to mask out is
-    # # determined by mask_ratio * unknown_number_in_the_beginning.
-    # ratio = 1. * (step + 1) / num_iter
-    # mask_ratio = mask_schedule.schedule(ratio, unknown_number_in_the_beginning,
-    #                                     mask_scheduling_method)
-    # # Updates final seqs with the current sampled_ids.
-    # final_seqs = jax.lax.dynamic_update_slice(
-    #     state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
-    # # Computes the probabilities of each selected tokens.
-    # probs = jax.nn.softmax(logits, axis=-1)
-    # selected_probs = jnp.squeeze(
-    #     jnp.take_along_axis(probs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
-    # # Ignores the tokens given in the input by overwriting their confidence.
-    # selected_probs = jnp.where(unknown_map, selected_probs,
-    #                            _CONFIDENCE_OF_KNOWN_TOKENS)
-    # # Gets mask lens for each sample in the batch according to the mask ratio.
-    # mask_len = jnp.expand_dims(
-    #     jnp.floor(unknown_number_in_the_beginning * mask_ratio), 1)
-    # # Keeps at least one of prediction in this round and also masks out at least
-    # # one and for the next iteration
-    # mask_len = jnp.maximum(
-    #     1,
-    #     jnp.minimum(jnp.sum(unknown_map, axis=-1, keepdims=True) - 1, mask_len))
-    #
-    # # Adds noise for randomness
-    # rng, choice_rng = jax.random.split(rng)
-    # masking = mask_by_random_topk(choice_rng, mask_len, selected_probs,
-    #                               choice_temperature * (1. - ratio))
-    # # Masks tokens with lower confidence.
-    # sampled_ids = jnp.where(masking, mask_token_id, sampled_ids)
+    ######## MaskGiT approach ########
+    elif decoding_strategy == 'maskgit':
+      rng, sample_rng = jax.random.split(rng, 2)
+      # Samples the ids using categorical sampling: [batch_size, seq_length].
+      sampled_ids = jax.random.categorical(sample_rng, logits)
+
+      # Just updates the masked tokens.
+      unknown_map = (cur_ids == mask_token_id)
+      sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
+      # Defines the mask ratio for the next round. The number to mask out is
+      # determined by mask_ratio * unknown_number_in_the_beginning.
+      ratio = 1. * (step + 1) / num_iter
+      mask_ratio = mask_schedule.schedule(ratio, unknown_number_in_the_beginning,
+                                          mask_scheduling_method)
+      # Updates final seqs with the current sampled_ids.
+      final_seqs = jax.lax.dynamic_update_slice(
+          state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
+      # Computes the probabilities of each selected tokens.
+      probs = jax.nn.softmax(logits, axis=-1)
+      selected_probs = jnp.squeeze(
+          jnp.take_along_axis(probs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
+      # Ignores the tokens given in the input by overwriting their confidence.
+      selected_probs = jnp.where(unknown_map, selected_probs,
+                                 _CONFIDENCE_OF_KNOWN_TOKENS)
+      # Gets mask lens for each sample in the batch according to the mask ratio.
+      mask_len = jnp.expand_dims(
+          jnp.floor(unknown_number_in_the_beginning * mask_ratio), 1)
+      # Keeps at least one of prediction in this round and also masks out at least
+      # one and for the next iteration
+      mask_len = jnp.maximum(
+          1,
+          jnp.minimum(jnp.sum(unknown_map, axis=-1, keepdims=True) - 1, mask_len))
+
+      # Adds noise for randomness
+      rng, choice_rng = jax.random.split(rng)
+      masking = mask_by_random_topk(choice_rng, mask_len, selected_probs,
+                                    choice_temperature * (1. - ratio))
+      # Masks tokens with lower confidence.
+      sampled_ids = jnp.where(masking, mask_token_id, sampled_ids)
+    else:
+      raise ValueError(f"Unknown decoding strategy: {decoding_strategy}")
 
     return State(
         cur_index=state.cur_index + 1,
