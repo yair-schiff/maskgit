@@ -31,7 +31,7 @@ from maskgit.configs import maskgit_class_cond_config
 from maskgit.libml import parallel_decode
 from maskgit.utils import restore_from_path
 
-#TODO: this can be usedforediting aswell; justneedto pass in a different start_iter
+#TODO: this can be used for editing as well; just need to pass in a different start_iter
 #TODO: perhaps move rng out of  this class?
 class ImageNet_class_conditional_generator():
     def checkpoint_canonical_path(maskgit_or_tokenizer, image_size):
@@ -112,11 +112,11 @@ class ImageNet_class_conditional_generator():
         """
         return jax.pmap(functools.partial(self.generate_samples, **kwargs), axis_name="batch")
 
-    def p_edit_samples(self, start_iter=2, num_iterations=12):
+    def p_edit_samples(self, start_iter=2, num_iter=12):
         """For TPUs/GPUs with lots of memory, using pmap provides a substantial speedup, but
         requires a slightly different API call and a different input shape.
         """
-        return jax.pmap(functools.partial(self.generate_samples, start_iter=start_iter, num_iterations=num_iterations), axis_name="batch")
+        return jax.pmap(functools.partial(self.generate_samples, start_iter=start_iter, num_iter=num_iter), axis_name="batch")
 
     def pmap_input_tokens(self, input_tokens):
         device_count = jax.local_device_count()
@@ -160,7 +160,7 @@ class ImageNet_class_conditional_generator():
         label_tokens = label_tokens + self.maskgit_cf.vqvae.codebook_size
         # Concatenate the two as input_tokens
         input_tokens = jnp.concatenate([label_tokens, masked_tokens], axis=-1)
-        return (latent_mask, input_tokens.astype(jnp.int32))
+        return latent_mask, input_tokens.astype(jnp.int32)
 
     def composite_outputs(self, input, latent_mask, outputs):
         imgs = self._create_input_batch(input)
