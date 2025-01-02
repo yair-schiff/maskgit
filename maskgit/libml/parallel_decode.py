@@ -72,11 +72,11 @@ def state_init(init_indices, rng, num_iter, start_iter=0):
   """Initializes the decoding state data structure."""
   cur_index0 = jnp.array(start_iter)
   cur_seqs0 = init_indices
-  cur_logprob0 = jnp.ones_like(init_indices, dtype=jnp.float32) * -_CONFIDENCE_OF_KNOWN_TOKENS
+  cur_logprobs0 = jnp.ones_like(init_indices, dtype=jnp.float32) * -_CONFIDENCE_OF_KNOWN_TOKENS
   final_seqs0 = jnp.expand_dims(init_indices, 1)
   final_seqs0 = jnp.tile(final_seqs0, (1, num_iter, 1))
   return State(
-      cur_index=cur_index0, cur_seqs=cur_seqs0, cur_logprob=cur_logprob0, rng=rng, final_seqs=final_seqs0)
+      cur_index=cur_index0, cur_seqs=cur_seqs0, cur_logprobs=cur_logprobs0, rng=rng, final_seqs=final_seqs0)
 
 def decode(inputs,
            rng,
@@ -145,9 +145,9 @@ def decode(inputs,
       x_theta = jax.nn.softmax(logits, axis=-1)
 
       # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
-      eta = jax.nn.softmax(state.cur_logprob, axis=-1)
+      eta = jax.nn.softmax(state.cur_logprobs, axis=-1)
       eta = jnp.nan_to_num(jnp.where((cur_ids == mask_token_id), 0., eta))
-      sigma = eta * max_sigma
+      sigma = eta[..., None] * max_sigma
 
       # Compute MDIM posterior
       limiting_distribution = jax.nn.one_hot(jnp.array([vocab_size - 1]), vocab_size)
@@ -169,7 +169,7 @@ def decode(inputs,
       selected_logprobs = jnp.squeeze(
         jnp.take_along_axis(logprobs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
       # Keep masked tokens' logprobs as -inf
-      cur_logprobs = jnp.where((sampled_ids == mask_token_id), state.cur_logprob, selected_logprobs)
+      cur_logprobs = jnp.where((sampled_ids == mask_token_id), state.cur_logprobs, selected_logprobs)
       # (re-)Hardcode BOS token
       sampled_ids = sampled_ids.at[..., 0].set(cur_ids[..., 0])
       cur_logprobs = cur_logprobs.at[..., 0].set(-_CONFIDENCE_OF_KNOWN_TOKENS)  # BOS token should remain unmasked
@@ -200,7 +200,7 @@ def decode(inputs,
       sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
       final_seqs = jax.lax.dynamic_update_slice(
         state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
-      cur_logprobs = None
+      cur_logprobs = jnp.zeros_like(cur_ids, dtype=state.cur_logprobs.dtype)
 
     ######## MaskGiT ########
     elif decoding_strategy == 'maskgit':
@@ -241,7 +241,7 @@ def decode(inputs,
                                     choice_temperature * (1. - ratio))
       # Masks tokens with lower confidence.
       sampled_ids = jnp.where(masking, mask_token_id, sampled_ids)
-      cur_logprobs = None
+      cur_logprobs = jnp.zeros_like(cur_ids, dtype=state.cur_logprobs.dtype)
     else:
       raise ValueError(f"Unknown decoding strategy: {decoding_strategy}")
 
