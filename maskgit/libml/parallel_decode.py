@@ -84,7 +84,8 @@ def decode(inputs,
            num_iter=12,
            start_iter=0,
            choice_temperature=1.0,
-           mask_scheduling_method="cosine"):
+           mask_scheduling_method="cosine",
+           mdim_eta=0.):
   """Fast decoding for iterative generation.
 
   Args:
@@ -101,6 +102,7 @@ def decode(inputs,
     choice_temperature: float: temperature to control the randomness of masking.
     mask_scheduling_method: masking method string. See mask_schedule.py for
       details.
+    mdim_eta: float: eta parameter for MDIM decoding strategy.
 
   Returns:
      [batch_size, num_iter, seq_length] output sequence of tokens in all
