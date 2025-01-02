@@ -63,7 +63,7 @@ class State:
   # The active sequence log probabilities and finished sequence scores.
   cur_seqs: jnp.ndarray  # int32 [batch, seq_len]
   # The logprob of the decoded token (at time of decoding); set to -inf for masked tokens
-  cur_logprob: jnp.ndarray  # float32 [batch, seq_len]
+  cur_logprobs: jnp.ndarray  # float32 [batch, seq_len]
   rng: jnp.ndarray  # Sampling random state.
   final_seqs: jnp.ndarray  # int32 [batch, num_iter, seq_len]
 
