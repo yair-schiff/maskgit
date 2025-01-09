@@ -16,13 +16,15 @@
 
 import flax
 import jax
-from jax import lax
 import jax.numpy as jnp
+from jax import lax
+from jax_tqdm import loop_tqdm
+
 from maskgit.libml import mask_schedule
 
-# Confidence score for known tokens to avoid masking or repredicting them.
+# Confidence score for known tokens to avoid masking or re-predicting them.
 # Here we don't use 1.0 because the upper bounder of the probability can be
-# possiblity larger than 1 due to the noise addition.
+# possibility larger than 1 due to the noise addition.
 _CONFIDENCE_OF_KNOWN_TOKENS = jnp.inf
 
 
@@ -63,7 +65,7 @@ class State:
   # The active sequence log probabilities and finished sequence scores.
   cur_seqs: jnp.ndarray  # int32 [batch, seq_len]
   # The logprob of the decoded token (at time of decoding); set to -inf for masked tokens
-  cur_logprobs: jnp.ndarray  # float32 [batch, seq_len]
+  cur_neg_logprobs: jnp.ndarray  # float32 [batch, seq_len]
   rng: jnp.ndarray  # Sampling random state.
   final_seqs: jnp.ndarray  # int32 [batch, num_iter, seq_len]
 
@@ -72,11 +74,15 @@ def state_init(init_indices, rng, num_iter, start_iter=0):
   """Initializes the decoding state data structure."""
   cur_index0 = jnp.array(start_iter)
   cur_seqs0 = init_indices
-  cur_logprobs0 = jnp.ones_like(init_indices, dtype=jnp.float32) * -_CONFIDENCE_OF_KNOWN_TOKENS
+  cur_neg_logprobs0 = jnp.ones_like(init_indices, dtype=jnp.float32) * -_CONFIDENCE_OF_KNOWN_TOKENS
   final_seqs0 = jnp.expand_dims(init_indices, 1)
   final_seqs0 = jnp.tile(final_seqs0, (1, num_iter, 1))
   return State(
-      cur_index=cur_index0, cur_seqs=cur_seqs0, cur_logprobs=cur_logprobs0, rng=rng, final_seqs=final_seqs0)
+    cur_index=cur_index0,
+    cur_seqs=cur_seqs0,
+    cur_neg_logprobs=cur_neg_logprobs0,
+    rng=rng,
+    final_seqs=final_seqs0)
 
 def decode(inputs,
            rng,
@@ -86,8 +92,7 @@ def decode(inputs,
            num_iter=12,
            start_iter=0,
            choice_temperature=1.0,
-           mask_scheduling_method="cosine",
-           mdim_eta=0.):
+           mask_scheduling_method="cosine"):
   """Fast decoding for iterative generation.
 
   Args:
@@ -104,7 +109,6 @@ def decode(inputs,
     choice_temperature: float: temperature to control the randomness of masking.
     mask_scheduling_method: masking method string. See mask_schedule.py for
       details.
-    mdim_eta: float: eta parameter for MDIM decoding strategy.
 
   Returns:
      [batch_size, num_iter, seq_length] output sequence of tokens in all
@@ -120,10 +124,11 @@ def decode(inputs,
     not_at_end = (state.cur_index < num_iter)
     return not_at_end
 
-  def loop_body_fn(state):
+  @loop_tqdm(num_iter, leave=False)
+  def loop_body_fn(step: int, state: State) -> State:
     """Beam search loop state update function."""
-    rng = state.rng
-    step = state.cur_index
+    loop_rng = state.rng
+    # step = state.cur_index
     # Current input ids: [batch_size, seq_length].
     cur_ids = state.cur_seqs
 
@@ -145,7 +150,7 @@ def decode(inputs,
       x_theta = jax.nn.softmax(logits, axis=-1)
 
       # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
-      eta = jax.nn.softmax(state.cur_logprobs, axis=-1)
+      eta = jax.nn.softmax(state.cur_neg_logprobs, axis=-1)
       eta = jnp.nan_to_num(jnp.where((cur_ids == mask_token_id), 0., eta))
       sigma = eta[..., None] * max_sigma
 
@@ -159,20 +164,20 @@ def decode(inputs,
       q_xs = jnp.where((cur_ids == mask_token_id)[..., None], case1, case2)
 
       # Sample the ids using categorical sampling: [batch_size, seq_length].
-      rng, sample_rng = jax.random.split(rng, 2)
+      loop_rng, sample_rng = jax.random.split(loop_rng, 2)
       gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
       sampled_ids = (q_xs / gumbel_norm).argmax(axis=-1)
       # Replace token |V| with mask_token_id
       sampled_ids = jnp.where(sampled_ids == (vocab_size - 1), mask_token_id, sampled_ids)
-      # Update decoded logprobs
-      logprobs = jax.nn.log_softmax(logits, axis=-1)
-      selected_logprobs = jnp.squeeze(
-        jnp.take_along_axis(logprobs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
-      # Keep masked tokens' logprobs as -inf
-      cur_logprobs = jnp.where((sampled_ids == mask_token_id), state.cur_logprobs, selected_logprobs)
+      # Update decoded neg_logprobs
+      neg_logprobs = -jax.nn.log_softmax(logits, axis=-1)
+      selected_neg_logprobs = jnp.squeeze(
+        jnp.take_along_axis(neg_logprobs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
+      # Keep masked tokens' neg_logprobs as -inf
+      cur_neg_logprobs = jnp.where((sampled_ids == mask_token_id), state.cur_neg_logprobs, selected_neg_logprobs)
       # (re-)Hardcode BOS token
       sampled_ids = sampled_ids.at[..., 0].set(cur_ids[..., 0])
-      cur_logprobs = cur_logprobs.at[..., 0].set(-_CONFIDENCE_OF_KNOWN_TOKENS)  # BOS token should remain unmasked
+      cur_neg_logprobs = cur_neg_logprobs.at[..., 0].set(-_CONFIDENCE_OF_KNOWN_TOKENS)  # BOS token should remain unmasked
       final_seqs = jax.lax.dynamic_update_slice(
         state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
 
@@ -189,7 +194,7 @@ def decode(inputs,
       q_xs = x_theta * (move_chance_t - move_chance_s) / move_chance_t
       q_xs = q_xs.at[..., mask_token_id].set(move_chance_s / move_chance_t)
 
-      rng, sample_rng = jax.random.split(rng, 2)
+      loop_rng, sample_rng = jax.random.split(loop_rng, 2)
       # Sample the ids using categorical sampling: [batch_size, seq_length].
       # sampled_ids = jax.random.categorical(sample_rng, q_xs)
       gumbel_norm = 1e-10 - jnp.log(jax.random.uniform(sample_rng, q_xs.shape) + 1e-10)
@@ -200,12 +205,12 @@ def decode(inputs,
       sampled_ids = jnp.where(unknown_map, sampled_ids, cur_ids)
       final_seqs = jax.lax.dynamic_update_slice(
         state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
-      cur_logprobs = jnp.zeros_like(cur_ids, dtype=state.cur_logprobs.dtype)
+      cur_neg_logprobs = jnp.zeros_like(cur_ids, dtype=state.cur_neg_logprobs.dtype)
 
     ######## MaskGiT ########
     elif decoding_strategy == 'maskgit':
-      rng, sample_rng = jax.random.split(rng, 2)
-      # Samples the ids using categorical sampling: [batch_size, seq_length].
+      loop_rng, sample_rng = jax.random.split(loop_rng, 2)
+      # Sample the ids using categorical sampling: [batch_size, seq_length].
       sampled_ids = jax.random.categorical(sample_rng, logits)
 
       # Just updates the masked tokens.
@@ -219,7 +224,7 @@ def decode(inputs,
       # Updates final seqs with the current sampled_ids.
       final_seqs = jax.lax.dynamic_update_slice(
           state.final_seqs, jnp.expand_dims(sampled_ids, axis=1), (0, step, 0))
-      # Computes the probabilities of each selected tokens.
+      # Computes the probabilities of each selected token.
       probs = jax.nn.softmax(logits, axis=-1)
       selected_probs = jnp.squeeze(
           jnp.take_along_axis(probs, jnp.expand_dims(sampled_ids.astype(jnp.int32), -1), -1), -1)
@@ -236,23 +241,24 @@ def decode(inputs,
           jnp.minimum(jnp.sum(unknown_map, axis=-1, keepdims=True) - 1, mask_len))
 
       # Adds noise for randomness
-      rng, choice_rng = jax.random.split(rng)
+      loop_rng, choice_rng = jax.random.split(loop_rng)
       masking = mask_by_random_topk(choice_rng, mask_len, selected_probs,
                                     choice_temperature * (1. - ratio))
       # Masks tokens with lower confidence.
       sampled_ids = jnp.where(masking, mask_token_id, sampled_ids)
-      cur_logprobs = jnp.zeros_like(cur_ids, dtype=state.cur_logprobs.dtype)
+      cur_neg_logprobs = jnp.zeros_like(cur_ids, dtype=state.cur_neg_logprobs.dtype)
     else:
       raise ValueError(f"Unknown decoding strategy: {decoding_strategy}")
 
     return State(
         cur_index=state.cur_index + 1,
         cur_seqs=sampled_ids,
-        cur_logprobs=cur_logprobs,
-        rng=rng,
+        cur_neg_logprobs=cur_neg_logprobs,
+        rng=loop_rng,
         final_seqs=final_seqs)
 
   # Run while loop and get final beam search state.
-  final_state = lax.while_loop(loop_cond_fn, loop_body_fn, init_state)
+  # final_state = lax.while_loop(loop_cond_fn, loop_body_fn, init_state)
+  final_state = lax.fori_loop(0, num_iter, loop_body_fn, init_state)
   return final_state.final_seqs
 

@@ -14,6 +14,8 @@
 
 import os
 import io
+import typing
+
 import flax
 import functools
 import jax
@@ -97,12 +99,21 @@ class ImageNet_class_conditional_generator():
 
       return gen_images
 
-    def create_input_tokens_normal(self, label):
-        label_tokens = label * jnp.ones([self.maskgit_cf.eval_batch_size, 1])
+    def create_input_tokens_normal(
+        self,
+        label,  # int or jnp.array
+        batch_size=None  # int
+    ):
+        if isinstance(label, jnp.ndarray):
+            label_tokens = label
+            batch_size = label_tokens.shape[0]
+        else:
+            batch_size = batch_size if batch_size is not None else self.maskgit_cf.eval_batch_size
+            label_tokens = label * jnp.ones([batch_size, 1])
         # Shift the label by codebook_size
         label_tokens = label_tokens + self.maskgit_cf.vqvae.codebook_size
         # Create blank masked tokens
-        blank_tokens = jnp.ones([self.maskgit_cf.eval_batch_size, self.transformer_block_size-1])
+        blank_tokens = jnp.ones([batch_size, self.transformer_block_size-1])
         masked_tokens = self.maskgit_cf.transformer.mask_token_id * blank_tokens
         # Concatenate the two as input_tokens
         input_tokens = jnp.concatenate([label_tokens, masked_tokens], axis=-1)
