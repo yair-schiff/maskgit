@@ -92,7 +92,10 @@ def decode(inputs,
            num_iter=12,
            start_iter=0,
            choice_temperature=1.0,
-           mask_scheduling_method="cosine"):
+           sampling_temperature=1.0,
+           sampling_temperature_annealing=False,
+           mask_scheduling_method="cosine",
+           mdim_eta=0.0):
   """Fast decoding for iterative generation.
 
   Args:
@@ -107,8 +110,11 @@ def decode(inputs,
     num_iter: int: default is 12.
     start_iter: int: default is 0.
     choice_temperature: float: temperature to control the randomness of masking.
+    sampling_temperature: float: temperature to control the randomness of token id sampling.
+    sampling_temperature_annealing: bool: whether to use sampling temperature annealing.
     mask_scheduling_method: masking method string. See mask_schedule.py for
       details.
+    mdim_eta: float: eta value for MDIM constant / loop decoding strategy.
 
   Returns:
      [batch_size, num_iter, seq_length] output sequence of tokens in all
@@ -133,26 +139,40 @@ def decode(inputs,
     cur_ids = state.cur_seqs
 
     # Calls model on current seqs to get next-iteration seqs.
-    logits = tokens_to_logits(cur_ids)
+    if sampling_temperature_annealing:
+      temp = sampling_temperature * (num_iter - step) / num_iter
+    else:
+      temp = sampling_temperature
+    logits = tokens_to_logits(cur_ids) / temp
     vocab_size = logits.shape[-1]
 
     ####### MDIM ########
-    if decoding_strategy == 'mdim':
-      # Compute max sigma value
+    if 'mdim' in decoding_strategy:
+      # Compute alpha
       t = 1. * (num_iter - step) / num_iter
       alpha_t = mask_schedule.schedule(t, unknown_number_in_the_beginning, mask_scheduling_method)
       s = 1. * (num_iter - step - 1) / num_iter
       alpha_s = mask_schedule.schedule(s, unknown_number_in_the_beginning, mask_scheduling_method)
-      max_sigma = jnp.minimum((1 - alpha_s) / alpha_t, 1.)
 
       # Forward pass
       logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
       x_theta = jax.nn.softmax(logits, axis=-1)
 
-      # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
-      eta = jax.nn.softmax(state.cur_neg_logprobs, axis=-1)
-      eta = jnp.nan_to_num(jnp.where((cur_ids == mask_token_id), 0., eta))
-      sigma = eta[..., None] * max_sigma
+      if decoding_strategy == 'mdim_conf':
+        # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
+        max_sigma = jnp.minimum((1 - alpha_s) / alpha_t, 1.)
+        eta = jax.nn.softmax(state.cur_neg_logprobs, axis=-1)
+        eta = jnp.nan_to_num(jnp.where((cur_ids == mask_token_id), 0., eta))
+        sigma = eta[..., None] * max_sigma
+      elif decoding_strategy == 'mdim_const':
+        # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
+        max_sigma = jnp.minimum((1 - alpha_s) / alpha_t, 1.)
+        sigma = mdim_eta * max_sigma
+      elif decoding_strategy == 'mdim_const_guanghan':
+        sigma = jnp.minimum((1 - alpha_s) / alpha_t, mdim_eta)
+      # TODO: Implement MDIM-Loop
+      else:
+        raise NotImplementedError(f"MDIM decoding strategy {decoding_strategy} not implemented.")
 
       # Compute MDIM posterior
       limiting_distribution = jax.nn.one_hot(jnp.array([vocab_size - 1]), vocab_size)

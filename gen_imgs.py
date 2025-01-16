@@ -10,7 +10,12 @@ from PIL import Image
 
 from maskgit.inference import ImageNet_class_conditional_generator
 
-if __name__ == '__main__':
+
+def str2bool(v):
+	return v.lower() in ("yes", "true", "t", "1")
+
+
+if __name__ == "__main__":
 	"""
 	python gen_imgs.py \
 		--output_image_path ./outputs/images \
@@ -24,40 +29,47 @@ if __name__ == '__main__':
 		--num_iter 16 \
 		--mask_scheduling_method uniform
 	"""
-	parser = argparse.ArgumentParser(description='Generate images from a trained model')
-	parser.add_argument('--output_image_path', type=str, default='./outputs/images',
-											help='Path to save the generated images')
-	parser.add_argument('--output_label_path', type=str, default='./outputs/labels',
-											help='Path to save the generated labels')
-	parser.add_argument('--output_start_index', type=int, default=0,
-											help='Starting index for the output files')
-	parser.add_argument('--seed', type=int, default=42,
-											help='Random seed')
-	parser.add_argument('--num_batches', type=int, default=1,
-											help='Number of batches to generate')
-	parser.add_argument('--batch_size', type=int, default=8,
-											help='Batch size')
-	parser.add_argument('--image_size', type=int, default=256,
-											help='Size of the generated images')
-	parser.add_argument('--decoding_strategy', type=str, default='mdim',
-											help='Decoding strategy',
-											choices=['maskgit', 'mdim', 'mdlm'])
-	parser.add_argument('--num_iter', type=int, default=16,
-											help='Number of iterations')
-	parser.add_argument('--mask_scheduling_method', type=str, default='uniform',
-											help='Mask scheduling method',
-											choices=['uniform', 'pow', 'cosine', 'log', 'exp'])
+	parser = argparse.ArgumentParser(description="Generate images from a trained model")
+	parser.add_argument("--output_image_path", type=str, default="./outputs/images",
+											help="Path to save the generated images")
+	parser.add_argument("--output_label_path", type=str, default="./outputs/labels",
+											help="Path to save the generated labels")
+	parser.add_argument("--output_start_index", type=int, default=0,
+											help="Starting index for the output files")
+	parser.add_argument("--seed", type=int, default=42,
+											help="Random seed")
+	parser.add_argument("--num_batches", type=int, default=1,
+											help="Number of batches to generate")
+	parser.add_argument("--batch_size", type=int, default=8,
+											help="Batch size")
+	parser.add_argument("--image_size", type=int, default=256,
+											help="Size of the generated images")
+	parser.add_argument("--decoding_strategy", type=str, default="maskgit",
+											help="Decoding strategy",
+											choices=["maskgit", "mdlm", "mdim_conf", "mdim_const", "mdim_const_guanghan"])
+	parser.add_argument("--mdim_eta", type=float, default=0.0,
+											help="MDIM eta (used for MDIM constant / looping decoding")
+	parser.add_argument("--num_iter", type=int, default=16,
+											help="Number of iterations")
+	parser.add_argument("--mask_scheduling_method", type=str, default="uniform",
+											help="Mask scheduling method")
+											# choices=["uniform", "pow", "cosine", "log", "exp"])
+	parser.add_argument("--sampling_temperature", type=float, default=1.0,
+											help="Sampling temperature")
+	parser.add_argument("--sampling_temperature_annealing", type=str, default="False",
+											help="Use sampling temperature annealing.",
+											choices=["True", "False"])
 	args = parser.parse_args()
 
-	style = 'dim'
-	tree = rich.tree.Tree('CONFIG', style=style, guide_style=style)
+	style = "dim"
+	tree = rich.tree.Tree("CONFIG", style=style, guide_style=style)
 
 	fields = vars(args).keys()
 	for field in fields:
 		branch = tree.add(field, style=style, guide_style=style)
 		config_section = vars(args).get(field)
 		branch_content = str(config_section)
-		branch.add(rich.syntax.Syntax(branch_content, 'yaml'))
+		branch.add(rich.syntax.Syntax(branch_content, "yaml"))
 	rich.print(tree)
 
 	output_image_path = args.output_image_path
@@ -69,8 +81,11 @@ if __name__ == '__main__':
 	generator = ImageNet_class_conditional_generator(image_size=image_size)
 	arbitrary_seed = args.seed + index
 	decoding_strategy = args.decoding_strategy
+	mdim_eta = args.mdim_eta
 	num_iter = args.num_iter
 	mask_scheduling_method = args.mask_scheduling_method
+	sampling_temperature = args.sampling_temperature
+	sampling_temperature_annealing = str2bool(args.sampling_temperature_annealing)
 	print(f"Generating {num_batches * batch_size:,d} images ({num_batches:,d} batches * {batch_size:,d} images per batch)"
 				f" - Indices [{index:06d}, {index + num_batches * batch_size - 1:06d}]\n")
 
@@ -97,8 +112,11 @@ if __name__ == '__main__':
 		results = generator.generate_samples(
 			input_tokens, sample_rng,
 			decoding_strategy=decoding_strategy,
+			mdim_eta=mdim_eta,
 			num_iter=num_iter,
-			mask_scheduling_method=mask_scheduling_method)
+			mask_scheduling_method=mask_scheduling_method,
+			sampling_temperature_annealing=sampling_temperature_annealing,
+			sampling_temperature=sampling_temperature)
 
 		# Save images
 		for j in range(batch_size):
