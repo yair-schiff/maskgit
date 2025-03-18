@@ -95,7 +95,7 @@ def decode(inputs,
            sampling_temperature=1.0,
            sampling_temperature_annealing=False,
            mask_scheduling_method="cosine",
-           mdim_eta=0.0):
+           remdm_eta=0.0):
   """Fast decoding for iterative generation.
 
   Args:
@@ -105,7 +105,7 @@ def decode(inputs,
     tokens_to_logits: decoder function taking single token slices and cache and
       returning logits and updated cache.
     decoding_strategy: string: decoding strategy to use.
-      Options are 'maskgit', 'mdim', 'mdlm'.
+      Options are 'maskgit', 'remdm', 'mdlm'.
     mask_token_id: int: [Mask] token id.
     num_iter: int: default is 12.
     start_iter: int: default is 0.
@@ -114,7 +114,7 @@ def decode(inputs,
     sampling_temperature_annealing: bool: whether to use sampling temperature annealing.
     mask_scheduling_method: masking method string. See mask_schedule.py for
       details.
-    mdim_eta: float: eta value for MDIM constant / loop decoding strategy.
+    remdm_eta: float: eta value for REMDM constant / loop decoding strategy.
 
   Returns:
      [batch_size, num_iter, seq_length] output sequence of tokens in all
@@ -146,8 +146,8 @@ def decode(inputs,
     logits = tokens_to_logits(cur_ids) / temp
     vocab_size = logits.shape[-1]
 
-    ####### MDIM ########
-    if 'mdim' in decoding_strategy:
+    ####### REMDM ########
+    if 'remdm' in decoding_strategy:
       # Compute alpha
       t = 1. * (num_iter - step) / num_iter
       alpha_t = mask_schedule.schedule(t, unknown_number_in_the_beginning, mask_scheduling_method)
@@ -158,23 +158,23 @@ def decode(inputs,
       logits = logits.at[..., mask_token_id].set(-_CONFIDENCE_OF_KNOWN_TOKENS)
       x_theta = jax.nn.softmax(logits, axis=-1)
 
-      if decoding_strategy == 'mdim_conf':
+      if decoding_strategy == 'remdm_conf':
         # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
         max_sigma = jnp.minimum((1 - alpha_s) / alpha_t, 1.)
         eta = jax.nn.softmax(state.cur_neg_logprobs, axis=-1)
         eta = jnp.nan_to_num(jnp.where((cur_ids == mask_token_id), 0., eta))
         sigma = eta[..., None] * max_sigma
-      elif decoding_strategy == 'mdim_const':
+      elif decoding_strategy == 'remdm_rescale':
         # Compute sigma per token: sigma = 0 --> MDLM; sigma = max_sigma --> move as much mass away from z_t as possible
         max_sigma = jnp.minimum((1 - alpha_s) / alpha_t, 1.)
-        sigma = mdim_eta * max_sigma
-      elif decoding_strategy == 'mdim_const_guanghan':
-        sigma = jnp.minimum((1 - alpha_s) / alpha_t, mdim_eta)
-      # TODO: Implement MDIM-Loop
+        sigma = remdm_eta * max_sigma
+      elif decoding_strategy == 'remdm_cap':
+        sigma = jnp.minimum((1 - alpha_s) / alpha_t, remdm_eta)
+      # TODO: Implement REMDM-Loop
       else:
-        raise NotImplementedError(f"MDIM decoding strategy {decoding_strategy} not implemented.")
+        raise NotImplementedError(f"REMDM decoding strategy {decoding_strategy} not implemented.")
 
-      # Compute MDIM posterior
+      # Compute REMDM posterior
       limiting_distribution = jax.nn.one_hot(jnp.array([vocab_size - 1]), vocab_size)
       # Case 1: cur_ids = mask
       case1 = ((alpha_s - alpha_t * (1 - sigma)) / (1 - alpha_t) * x_theta +

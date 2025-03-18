@@ -25,7 +25,7 @@ if __name__ == "__main__":
 		--num_batches 2 \
 		--batch_size 8 \
 		--image_size 256 \
-		--decoding_strategy mdim \
+		--decoding_strategy remdm \
 		--num_iter 16 \
 		--mask_scheduling_method uniform
 	"""
@@ -46,9 +46,9 @@ if __name__ == "__main__":
 											help="Size of the generated images")
 	parser.add_argument("--decoding_strategy", type=str, default="maskgit",
 											help="Decoding strategy",
-											choices=["maskgit", "mdlm", "mdim_conf", "mdim_const", "mdim_const_guanghan"])
-	parser.add_argument("--mdim_eta", type=float, default=0.0,
-											help="MDIM eta (used for MDIM constant / looping decoding")
+											choices=["maskgit", "mdlm", "remdm_conf", "remdm_rescale", "remdm_cap"])
+	parser.add_argument("--remdm_eta", type=float, default=0.0,
+											help="REMDM eta (used for REMDM constant / looping decoding")
 	parser.add_argument("--num_iter", type=int, default=16,
 											help="Number of iterations")
 	parser.add_argument("--mask_scheduling_method", type=str, default="uniform",
@@ -81,7 +81,7 @@ if __name__ == "__main__":
 	generator = ImageNet_class_conditional_generator(image_size=image_size)
 	arbitrary_seed = args.seed + index
 	decoding_strategy = args.decoding_strategy
-	mdim_eta = args.mdim_eta
+	remdm_eta = args.remdm_eta
 	num_iter = args.num_iter
 	mask_scheduling_method = args.mask_scheduling_method
 	sampling_temperature = args.sampling_temperature
@@ -112,7 +112,7 @@ if __name__ == "__main__":
 		results = generator.generate_samples(
 			input_tokens, sample_rng,
 			decoding_strategy=decoding_strategy,
-			mdim_eta=mdim_eta,
+			remdm_eta=remdm_eta,
 			num_iter=num_iter,
 			mask_scheduling_method=mask_scheduling_method,
 			sampling_temperature_annealing=sampling_temperature_annealing,

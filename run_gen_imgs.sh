@@ -16,7 +16,7 @@
 #  - NUM_BATCHES
 #  - BATCH_SIZE
 #  - DECODING_STRATEGY
-#  - MDIM_ETA
+#  - REMDM_ETA
 #  - NUM_ITER
 #  - MASK_SCHEDULING_METHOD
 #  - OUTPUT_START_INDEX
@@ -32,7 +32,7 @@ if [ -z "${CONDA_PREFIX}" ]; then
   conda activate maskgit_env
 fi
 
-OUTPUT_DIR="${PWD}/outputs/${DECODING_STRATEGY}/num_iter-${NUM_ITER}_mask_sched-${MASK_SCHEDULING_METHOD}_samp-temp-anneal-${SAMPLING_TEMPERATURE_ANNEALING}_samp-temp-${SAMPLING_TEMPERATURE}_eta-${MDIM_ETA}"
+OUTPUT_DIR="${PWD}/outputs/${DECODING_STRATEGY}/num_iter-${NUM_ITER}_mask_sched-${MASK_SCHEDULING_METHOD}_samp-temp-anneal-${SAMPLING_TEMPERATURE_ANNEALING}_samp-temp-${SAMPLING_TEMPERATURE}_eta-${REMDM_ETA}"
 mkdir -p "${OUTPUT_DIR}"
 
 python gen_imgs.py \
@@ -44,7 +44,7 @@ python gen_imgs.py \
   --batch_size ${BATCH_SIZE} \
   --image_size 256 \
   --decoding_strategy "${DECODING_STRATEGY}" \
-  --mdim_eta ${MDIM_ETA} \
+  --remdm_eta ${REMDM_ETA} \
   --num_iter ${NUM_ITER} \
   --mask_scheduling_method "${MASK_SCHEDULING_METHOD}" \
   --sampling_temperature_annealing ${SAMPLING_TEMPERATURE_ANNEALING} \
