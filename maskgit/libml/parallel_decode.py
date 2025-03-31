@@ -170,11 +170,15 @@ def decode(inputs,
         sigma = remdm_eta * max_sigma
       elif decoding_strategy == 'remdm_cap':
         sigma = jnp.minimum((1 - alpha_s) / alpha_t, remdm_eta)
+      elif decoding_strategy == 'remdm_fb':
+        # Forward-backward corrector as ReMDM
+        sigma = jnp.minimum((alpha_s - alpha_t) / alpha_t, 1.)
+
       # TODO: Implement REMDM-Loop
       else:
-        raise NotImplementedError(f"REMDM decoding strategy {decoding_strategy} not implemented.")
+        raise NotImplementedError(f"ReMDM decoding strategy {decoding_strategy} not implemented.")
 
-      # Compute REMDM posterior
+      # Compute ReMDM posterior
       limiting_distribution = jax.nn.one_hot(jnp.array([vocab_size - 1]), vocab_size)
       # Case 1: cur_ids = mask
       case1 = ((alpha_s - alpha_t * (1 - sigma)) / (1 - alpha_t) * x_theta +

@@ -8,11 +8,11 @@ SEED=42
 SAMPLING_TEMPERATURE_ANNEALING=False
 
 export_str="ALL,SEED=${SEED},NUM_BATCHES=${NUM_BATCHES},BATCH_SIZE=${BATCH_SIZE},SAMPLING_TEMPERATURE_ANNEALING=${SAMPLING_TEMPERATURE_ANNEALING}"
-for NUM_ITER in 32; do
-  for DECODING_STRATEGY in "remdm_rescale" "remdm_cap"; do
+for NUM_ITER in 16 32 64; do
+  for DECODING_STRATEGY in "remdm_fb"; do
     for MASK_SCHEDULING_METHOD in "uniform"; do
-      for SAMPLING_TEMPERATURE in 0.6; do
-        for REMDM_ETA in 0.01 0.02 0.05; do
+      for SAMPLING_TEMPERATURE in 0.6 0.8 1.0; do
+        for REMDM_ETA in 1.0; do
           echo "***********************************************************************************************************"
           echo "Scheduling jobs for: DECODING_STRATEGY=${DECODING_STRATEGY},REMDM_ETA=${REMDM_ETA},NUM_ITER=${NUM_ITER},MASK_SCHEDULING_METHOD=${MASK_SCHEDULING_METHOD},SAMPLING_TEMPERATURE=${SAMPLING_TEMPERATURE}"
           export_str="${export_str},DECODING_STRATEGY=${DECODING_STRATEGY},REMDM_ETA=${REMDM_ETA},NUM_ITER=${NUM_ITER},MASK_SCHEDULING_METHOD=${MASK_SCHEDULING_METHOD},SAMPLING_TEMPERATURE=${SAMPLING_TEMPERATURE}"
