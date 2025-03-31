@@ -46,7 +46,8 @@ if __name__ == "__main__":
 											help="Size of the generated images")
 	parser.add_argument("--decoding_strategy", type=str, default="maskgit",
 											help="Decoding strategy",
-											choices=["maskgit", "mdlm", "remdm_conf", "remdm_rescale", "remdm_cap"])
+											choices=["maskgit", "mdlm",
+											         "remdm_conf", "remdm_rescale", "remdm_cap", "remdm_fb"])
 	parser.add_argument("--remdm_eta", type=float, default=0.0,
 											help="REMDM eta (used for REMDM constant / looping decoding")
 	parser.add_argument("--num_iter", type=int, default=16,
